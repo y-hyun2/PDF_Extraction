@@ -492,6 +492,22 @@ def main(argv: List[str] | None = None) -> int:
         if not pdf_path.exists():
             parser.error(f"PDF를 찾을 수 없습니다: {pdf_path}")
 
+    # Check for sanitized version automatically
+    # Pattern 1: report.sanitized.pdf (Original tool default)
+    # Pattern 2: report_sanitized.pdf (User modified convention)
+    if "_sanitized" not in pdf_path.name and ".sanitized" not in pdf_path.name:
+        candidates = [
+            pdf_path.with_suffix(".sanitized.pdf"),
+            pdf_path.with_stem(pdf_path.stem + "_sanitized").with_suffix(".pdf")
+        ]
+        
+        for cand in candidates:
+            if cand.exists():
+                print(f"⚠️  [Auto-Switch] Sanitized PDF found: {cand.name}")
+                print(f"    Switching input to use the sanitized version for better extraction.")
+                pdf_path = cand
+                break
+
     pdf_doc = pdfium.PdfDocument(str(pdf_path))
     total_pages = len(pdf_doc)
 

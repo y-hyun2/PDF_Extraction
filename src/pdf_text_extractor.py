@@ -41,7 +41,7 @@ def sanitize_pdf(pdf_path: str | Path, page_range: Optional[Tuple[int, int]] = N
     clean_doc = fitz.open()
     
     # Determine output path
-    sanitized_path = pdf_path.with_suffix(".sanitized.pdf")
+    sanitized_path = pdf_path.with_stem(pdf_path.stem + "_sanitized").with_suffix(".pdf")
     
     # Optimization: Reuse existing sanitized PDF if recently created
     if sanitized_path.exists():
@@ -222,7 +222,7 @@ def main() -> int:
         if is_compatible:
             print("\n[Pass] This PDF seems fine. You can skip sanitization.")
             # Note: The user pipeline expects a file. 
-            # If we don't sanitize, we don't produce the .sanitized.pdf.
+            # If we don't sanitize, we don't produce the _sanitized.pdf.
             # Users should use the original file then.
             return 0
         else:
