@@ -194,7 +194,7 @@ def init_database(conn):
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 page_id INT NOT NULL,
                 doc_id INT NOT NULL,
-                figure_type VARCHAR(50) DEFAULT 'chart',
+                page_no INT NOT NULL,
                 caption TEXT,
                 description TEXT,
                 image_path VARCHAR(255),
@@ -202,7 +202,8 @@ def init_database(conn):
                 FOREIGN KEY (page_id) REFERENCES pages(id) ON DELETE CASCADE,
                 FOREIGN KEY (doc_id) REFERENCES documents(id) ON DELETE CASCADE,
                 INDEX idx_figure_doc (doc_id),
-                INDEX idx_figure_page (page_id)
+                INDEX idx_figure_page (page_id),
+                INDEX idx_figure_doc_page (doc_id, page_no)
             )
         """)
     conn.commit()
@@ -298,7 +299,7 @@ def load_page(conn, doc_id: int, page_dir: Path):
             
         # Process Figures (with inferred index logic inside)
         for fig_meta in figures_list:
-            load_figure(conn, doc_id, page_id, page_dir, fig_meta)
+            load_figure(conn, doc_id, page_id, page_no, page_dir, fig_meta)
     
     conn.commit()
     print(f"Loaded Page {page_no} (ID: {page_id})")
@@ -384,7 +385,7 @@ def load_table(conn, doc_id: int, page_id: int, page_dir: Path, tbl_meta: Dict[s
             """, insert_data)
 
 
-def load_figure(conn, doc_id: int, page_id: int, page_dir: Path, fig_meta: Dict[str, Any]):
+def load_figure(conn, doc_id: int, page_id: int, page_no: int, page_dir: Path, fig_meta: Dict[str, Any]):
     figure_id_str = fig_meta.get("id") # figure_001
     caption = fig_meta.get("caption")
     bbox = fig_meta.get("bbox")
@@ -397,14 +398,15 @@ def load_figure(conn, doc_id: int, page_id: int, page_dir: Path, fig_meta: Dict[
     
     with conn.cursor() as cursor:
         cursor.execute("""
-            INSERT INTO doc_figures (page_id, doc_id, figure_type, bbox_json, caption, description, image_path)
+            INSERT INTO doc_figures (page_id, doc_id, page_no, bbox_json, caption, description, image_path)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 caption = VALUES(caption),
                 description = VALUES(description),
                 image_path = VALUES(image_path),
-                bbox_json = VALUES(bbox_json)
-        """, (page_id, doc_id, 'chart', json.dumps(bbox), caption, description, image_rel_path))
+                bbox_json = VALUES(bbox_json),
+                page_no = VALUES(page_no)
+        """, (page_id, doc_id, page_no, json.dumps(bbox), caption, description, image_rel_path))
 
 
 def main():
