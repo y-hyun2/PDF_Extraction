@@ -35,6 +35,10 @@ DEFAULT_INPUT_DIR = Path("data/pages_structured")
 # Group 1: Number part (with commas)
 # Group 3: Unit part (optional, remainder)
 NUMBER_PATTERN = re.compile(r"^([-+]?[\d,]+(?:\.\d+)?)\s*(.*)$")
+UNIT_DIRECT_PATTERN = re.compile(r"단위[:：]\s*([^\s)]+)")
+UNIT_PAREN_PATTERN = re.compile(r"\(단위[:：]?\s*([^)]+)\)")
+UNIT_SUFFIX_PATTERN = re.compile(r"\(([^)\d]{1,10})\)\s*$")
+UNIT_VALID_CHARS = re.compile(r"[A-Za-z가-힣%°℃/·]")
 
 
 def get_connection():
@@ -83,7 +87,46 @@ def parse_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
     return "Unknown", year
 
 
-def parse_cell_value(text: str) -> Tuple[Optional[float], Optional[str], str]:
+def extract_unit_hint(text: str | None) -> Optional[str]:
+    if not text:
+        return None
+    text = text.strip()
+    match = UNIT_PAREN_PATTERN.search(text)
+    if match:
+        return match.group(1).strip()
+    match = UNIT_DIRECT_PATTERN.search(text)
+    if match:
+        return match.group(1).strip()
+    match = UNIT_SUFFIX_PATTERN.search(text)
+    if match:
+        candidate = match.group(1).strip()
+        if candidate and len(candidate) <= 12 and UNIT_VALID_CHARS.search(candidate):
+            return candidate
+    return None
+
+
+def infer_table_units(cells: List[List[dict]]) -> tuple[Optional[str], dict[int, str]]:
+    global_unit: Optional[str] = None
+    column_units: dict[int, str] = {}
+    for row in cells[:3]:  # 첫 몇 행만 검사
+        for cell in row:
+            text = (cell.get("text") or "").strip()
+            if not text:
+                continue
+            unit_hint = extract_unit_hint(text)
+            if not unit_hint:
+                continue
+            col_idx = cell.get("col")
+            if "단위" in text and (not cell.get("column_header") or len(text) <= len(unit_hint) + 6):
+                if not global_unit:
+                    global_unit = unit_hint
+                continue
+            if cell.get("column_header") and col_idx is not None and col_idx not in column_units:
+                column_units[col_idx] = unit_hint
+    return global_unit, column_units
+
+
+def parse_cell_value(text: str, fallback_unit: Optional[str] = None) -> Tuple[Optional[float], Optional[str], str]:
     """
     Parse cell text to extract numeric value and unit.
     Returns: (numeric_value, unit, content_type)
@@ -103,7 +146,8 @@ def parse_cell_value(text: str) -> Tuple[Optional[float], Optional[str], str]:
             
         try:
             val = float(num_str)
-            return val, unit or None, 'number'
+            resolved_unit = unit or fallback_unit
+            return val, resolved_unit, 'number'
         except ValueError:
             pass
             
@@ -327,6 +371,7 @@ def load_table(conn, doc_id: int, page_id: int, page_no: int, page_dir: Path, tb
     diff_json_str = json.dumps(diff_data) if diff_data else None
     
     cells = table_data.get("cells", [])
+    global_unit, column_units = infer_table_units(cells)
 
     with conn.cursor() as cursor:
         # Upsert Table Meta
@@ -355,7 +400,11 @@ def load_table(conn, doc_id: int, page_id: int, page_no: int, page_dir: Path, tb
         for row_list in cells:
             for cell in row_list:
                 content = cell.get("text", "")
-                numeric_val, unit, c_type = parse_cell_value(content)
+                col_idx = cell.get("col")
+                fallback_unit = column_units.get(col_idx) if col_idx is not None else None
+                if not fallback_unit:
+                    fallback_unit = global_unit
+                numeric_val, unit, c_type = parse_cell_value(content, fallback_unit)
                 
                 insert_data.append((
                     db_table_id,
