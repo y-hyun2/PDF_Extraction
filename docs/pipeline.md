@@ -69,9 +69,6 @@
   ```
 
 ## 5. GPT 프롬프트 구성 가이드
-- `page.json`의 각 표에는 `json_path`(Docling 구조화 값)와 `ocr_path`(이미지 OCR 결과)가 기록된다. GPT 요약 시 두 경로를 함께 제공하면 텍스트 맥락과 이미지 기반 숫자를 모두 검증할 수 있다.
-- 그림 설명(`figure_***.desc.md`)과 `needs_visual_review` 플래그를 사용해 “이미지 우선 처리 페이지”를 자동 분기할 수 있다.
-
 ## 실행 순서 요약
 1. `structured_extract.py` – 페이지 구조화 + (옵션) GPT 요약
 2. `table_ocr.py` – 표 이미지 OCR
