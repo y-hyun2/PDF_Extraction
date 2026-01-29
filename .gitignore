@@ -8,7 +8,9 @@ __pycache__/
 
 # Data (keep structure only)
 data/**
+vector_db/**
 !data/**/.gitkeep
+!vector_db/**/.gitkeep
 
 # OS / Editor
 .DS_Store

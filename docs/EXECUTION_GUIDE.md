@@ -13,7 +13,7 @@
 python src/run_pipeline.py --pdf [PDF파일경로] [옵션...]
 ```
 
-### ✅ Scenario A: 표준 실행 (가장 많이 사용)
+### ✅ Scenario A: 표준 실행 
 특정 보고서의 일부 페이지(예: 1~20페이지)를 처리하고 DB에 저장합니다.
 ```bash
 python src/run_pipeline.py \
@@ -116,6 +116,19 @@ python src/figure_ocr.py \
 python src/table_diff.py \
     --structured-dir data/pages_structured/2023_HDEC_Report \
     --pages 10-15
+```
+
+---
+
+## 🔍 4. 벡터 DB 검색
+구축된 벡터 DB에서 유사한 내용을 검색합니다.
+
+```bash
+# 기본 검색 (Top 5)
+python src/search_vector_db.py "탄소배출량 추이"
+
+# 상위 3개만 검색
+python src/search_vector_db.py "이해관계자 참여" --top-k 3
 ```
 
 ---
