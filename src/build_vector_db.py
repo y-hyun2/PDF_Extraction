@@ -28,7 +28,6 @@ FIGURE_SUMMARY_LIMIT = 1500  # 페이지 대표 텍스트에서 그림 설명 �
 
 
 def get_or_create_collections(client: chromadb.PersistentClient, reset: bool):
-    """Chroma 컬렉션 생성/초기화."""
     if reset:
         for name in (PAGE_COLLECTION, CHUNK_COLLECTION):
             try:
@@ -40,7 +39,7 @@ def get_or_create_collections(client: chromadb.PersistentClient, reset: bool):
     chunk_col = client.get_or_create_collection(CHUNK_COLLECTION, metadata={"hnsw:space": "cosine"})
     return page_col, chunk_col
 
-#** 데이터베이스에서 데이터 가져오기 **
+
 def fetch_pages(conn) -> List[Dict[str, Any]]:
     sql = """
         SELECT d.id AS doc_id,
@@ -105,7 +104,6 @@ def fetch_tables(conn) -> List[Dict[str, Any]]:
 
 
 def fetch_table_cells(conn, table_ids: Iterable[int]) -> Dict[int, List[Dict[str, Any]]]:
-    '''해당 테이블의 셀을 한 번에 가져와서 테이블 ID별로 그룹화'''
     table_ids = list(table_ids)
     if not table_ids:
         return {}
@@ -125,7 +123,6 @@ def fetch_table_cells(conn, table_ids: Iterable[int]) -> Dict[int, List[Dict[str
         grouped[row["table_id"]].append(row)
     return grouped
 
-# 텍스트 만들기
 
 def build_table_text(table_meta: Dict[str, Any], cells: List[Dict[str, Any]]) -> str:
     rows: Dict[int, List[str]] = defaultdict(list)
@@ -173,20 +170,19 @@ def collect_page_metadata(page_row: Dict[str, Any], table_ids: List[int], figure
         "report_year": page_row.get("report_year") or 0,
         "filename": page_row["filename"],
         "page_image_path": page_row.get("image_path") or "",
-        "table_ids": [str(tid) for tid in table_ids],
-        "figure_ids": [str(fid) for fid in figure_ids],
+        "table_ids": json.dumps([str(tid) for tid in table_ids]),
+        "figure_ids": json.dumps([str(fid) for fid in figure_ids]),
         "created_at": datetime.now().isoformat(),
     }
 
-#청킹 (512size, 50overlap)
+
 def chunk_text(text: str, splitter: RecursiveCharacterTextSplitter) -> List[str]:
     text = (text or "").strip()
     if not text:
         return []
     return splitter.split_text(text)
 
-# text -> vector -> ChromaDB upsert
-#collection: Chroma 컬렉션(저장소)
+
 def embed_and_upsert(collection, model, ids, documents, metadatas):
     if not ids:
         return
@@ -194,7 +190,6 @@ def embed_and_upsert(collection, model, ids, documents, metadatas):
         batch_ids = ids[start:start + BATCH_SIZE]
         batch_docs = documents[start:start + BATCH_SIZE]
         batch_metas = metadatas[start:start + BATCH_SIZE]
-        #텍스트 벡터변환, numpy 배열 리스트로 변환
         embeddings = model.encode(batch_docs).tolist()
         collection.upsert(ids=batch_ids, documents=batch_docs, embeddings=embeddings, metadatas=batch_metas)
 
@@ -217,7 +212,6 @@ def build_vector_db(reset: bool = False) -> None:
         pages = fetch_pages(conn)
         figures = fetch_figures(conn)
         tables = fetch_tables(conn)
-        table_cells_map = fetch_table_cells(conn, [t["table_id"] for t in tables])
     finally:
         conn.close()
 
@@ -235,7 +229,7 @@ def build_vector_db(reset: bool = False) -> None:
     for tbl in tables:
         tables_by_page[tbl["page_id"]].append(tbl)
 
-    # ===== 1. 페이지 대표 텍스트 벡터화 =====
+    # 페이지 대표 텍스트 생성
     page_ids: List[str] = []
     page_docs: List[str] = []
     page_metas: List[Dict[str, Any]] = []
@@ -267,13 +261,13 @@ def build_vector_db(reset: bool = False) -> None:
     print(f"🧾 페이지 대표 텍스트 {len(page_ids)}건 임베딩")
     embed_and_upsert(page_collection, model, page_ids, page_docs, page_metas)
 
-    # ===== 2. 정밀 청크 벡터화 =====
+    # 정밀 청크 처리
     chunk_ids: List[str] = []
     chunk_docs: List[str] = []
     chunk_metas: List[Dict[str, Any]] = []
 
-    # 2-1. 페이지 본문 청크
     for page in pages:
+        # 페이지 본문 청크
         chunks = chunk_text(page["full_markdown"], splitter)
         for idx, chunk in enumerate(chunks):
             chunk_ids.append(f"page_{page['page_id']}_chunk_{idx}")
@@ -290,47 +284,49 @@ def build_vector_db(reset: bool = False) -> None:
                 "created_at": datetime.now().isoformat(),
             })
 
-    # 2-2. 표 요약 청크
-    for tbl in tables:
-        cells = table_cells_map.get(tbl["table_id"], [])
-        table_text = build_table_text(tbl, cells)
-        chunk_ids.append(f"table_{tbl['table_id']}")
-        chunk_docs.append(table_text)
-        chunk_metas.append({
-            "source_type": "table",
-            "doc_id": tbl["doc_id"],
-            "page_id": tbl["page_id"],
-            "page_no": tbl["page_no"],
-            "table_id": tbl["table_id"],
-            "table_title": tbl.get("title") or "",
-            "company_name": tbl.get("company_name") or "Unknown",
-            "report_year": tbl.get("report_year") or 0,
-            "filename": tbl["filename"],
-            "image_path": tbl.get("image_path") or "",
-            "diff_present": bool(tbl.get("diff_data")),
-            "created_at": datetime.now().isoformat(),
-        })
+        # 페이지 내 테이블 텍스트
+        page_tables = tables_by_page.get(page["page_id"], [])
+        table_cells_map = fetch_table_cells(get_connection(), [tbl["table_id"] for tbl in page_tables])
+        for tbl in page_tables:
+            cells = table_cells_map.get(tbl["table_id"], [])
+            table_text = build_table_text(tbl, cells)
+            chunk_ids.append(f"table_{tbl['table_id']}")
+            chunk_docs.append(table_text)
+            chunk_metas.append({
+                "source_type": "table",
+                "doc_id": tbl["doc_id"],
+                "page_id": tbl["page_id"],
+                "page_no": tbl["page_no"],
+                "table_id": tbl["table_id"],
+                "table_title": tbl.get("title") or "",
+                "company_name": tbl.get("company_name") or "Unknown",
+                "report_year": tbl.get("report_year") or 0,
+                "filename": tbl["filename"],
+                "image_path": tbl.get("image_path") or "",
+                "diff_present": bool(tbl.get("diff_data")),
+                "created_at": datetime.now().isoformat(),
+            })
 
-    # 2-3. 그림 설명 청크
-    for fig in figures:
-        desc = (fig.get("description") or "").strip()
-        if not desc:
-            continue
-        figure_text = f"캡션: {fig.get('caption') or ''}\n\n{desc}"
-        chunk_ids.append(f"figure_{fig['figure_id']}")
-        chunk_docs.append(figure_text)
-        chunk_metas.append({
-            "source_type": "figure",
-            "doc_id": fig["doc_id"],
-            "page_id": fig["page_id"],
-            "page_no": fig["page_no"],
-            "figure_id": fig["figure_id"],
-            "company_name": fig.get("company_name") or "Unknown",
-            "report_year": fig.get("report_year") or 0,
-            "filename": fig["filename"],
-            "image_path": fig.get("image_path") or "",
-            "created_at": datetime.now().isoformat(),
-        })
+        # 페이지 내 그림 설명
+        for fig in figures_by_page.get(page["page_id"], []):
+            desc = (fig.get("description") or "").strip()
+            if not desc:
+                continue
+            figure_text = f"캡션: {fig.get('caption') or ''}\n\n{desc}"
+            chunk_ids.append(f"figure_{fig['figure_id']}")
+            chunk_docs.append(figure_text)
+            chunk_metas.append({
+                "source_type": "figure",
+                "doc_id": fig["doc_id"],
+                "page_id": fig["page_id"],
+                "page_no": fig["page_no"],
+                "figure_id": fig["figure_id"],
+                "company_name": fig.get("company_name") or "Unknown",
+                "report_year": fig.get("report_year") or 0,
+                "filename": fig["filename"],
+                "image_path": fig.get("image_path") or "",
+                "created_at": datetime.now().isoformat(),
+            })
 
     print(f"🔍 정밀 청크 {len(chunk_ids)}건 임베딩")
     embed_and_upsert(chunk_collection, model, chunk_ids, chunk_docs, chunk_metas)
