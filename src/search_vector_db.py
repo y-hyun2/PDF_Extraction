@@ -180,7 +180,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         choices=("semantic", "keyword", "hybrid"),
-        default="semantic",
+        default="hybrid",
         help="검색 방식 선택 (semantic=임베딩, keyword=BM25, hybrid=두 방식 병합)",
     )
 
