@@ -14,6 +14,10 @@ from typing import Iterable, List
 import fitz
 from rapidocr import RapidOCR
 
+# Add src to path to allow importing sibling modules if run from root
+import sys
+sys.path.append(str(Path(__file__).parent))
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STRUCTURED_DIR = REPO_ROOT / "data" / "pages_structured"
@@ -30,9 +34,46 @@ def infer_default_pdf() -> Path:
     return candidates[0]
 
 
-def find_available_pages(structured_dir: Path) -> list[int]:
+def find_available_pages(structured_dir: Path) -> tuple[list[int], Path]:
     pages: list[int] = []
-    for child in structured_dir.iterdir():
+    actual_root = structured_dir
+    
+    # Check if root has page folders
+    root_has_pages = any(c.is_dir() and c.name.startswith("page_") for c in structured_dir.iterdir())
+    
+    if root_has_pages:
+        scan_dir = structured_dir
+    else:
+        # Try finding a subdirectory that looks like a report
+        # Prefer "sanitized" folder if multiple exist
+        candidates = [d for d in structured_dir.iterdir() if d.is_dir()]
+        sanitized = [d for d in candidates if "_sanitized" in d.name]
+        others = [d for d in candidates if "_sanitized" not in d.name]
+        
+        target_sub = None
+        
+        # Check sanitized first
+        for sub in sanitized:
+            if any(c.is_dir() and c.name.startswith("page_") for c in sub.iterdir()):
+                target_sub = sub
+                break
+        
+        # Then others
+        if not target_sub:
+            for sub in others:
+                 if any(c.is_dir() and c.name.startswith("page_") for c in sub.iterdir()):
+                    target_sub = sub
+                    break
+        
+        if target_sub:
+            print(f"INFO: Automatically detected report directory: {target_sub.name}")
+            scan_dir = target_sub
+            actual_root = target_sub
+        else:
+            scan_dir = structured_dir # Fallback to empty root
+
+    # Collect pages
+    for child in scan_dir.iterdir():
         if not child.is_dir() or not child.name.startswith("page_"):
             continue
         try:
@@ -41,7 +82,8 @@ def find_available_pages(structured_dir: Path) -> list[int]:
             continue
         if (child / "page.json").exists():
             pages.append(page_no)
-    return sorted(pages)
+
+    return sorted(pages), actual_root
 
 
 def parse_pages_arg(pages_arg: str, available: Iterable[int]) -> list[int]:
@@ -205,9 +247,12 @@ def main(argv: List[str] | None = None) -> int:
     if not structured_dir.exists():
         parser.error(f"구조화 폴더를 찾을 수 없습니다: {structured_dir}")
 
-    available_pages = find_available_pages(structured_dir)
+    available_pages, actual_structured_dir = find_available_pages(structured_dir)
     if not available_pages:
         parser.error("처리할 페이지가 없습니다. 먼저 structured_extract.py를 실행하세요.")
+
+    # Update structured_dir to the detected one so downstream logic works
+    structured_dir = actual_structured_dir 
 
     if args.pages:
         target_pages = parse_pages_arg(args.pages, available_pages)
@@ -276,15 +321,18 @@ def main(argv: List[str] | None = None) -> int:
                         continue
                     entries = process_table_image(ocr, image_path, ocr_json_path)
 
+                # Save standard OCR result
                 if args.backend == "pymupdf":
                     ocr_json_path.write_text(
                         json.dumps(entries, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
-
+                
+                # Update metadata with OCR path
                 preview = " ".join(item["text"] for item in entries[:5]) if entries else ""
                 relative_ocr_path = ocr_json_path.relative_to(structured_dir)
                 update_page_metadata(page_json_path, table_id, str(relative_ocr_path), preview)
+                
                 origin = "PDF" if args.backend == "pymupdf" else "RapidOCR"
                 print(f"텍스트 추출 완료({origin}): {table_id} -> {ocr_json_path}")
     finally:

@@ -377,7 +377,33 @@ def load_table(conn, doc_id: int, page_id: int, page_no: int, page_dir: Path, tb
     image_rel_path = tbl_meta.get("image_path")
 
     # Load Data
-    table_data = load_json_file(json_path)
+    # refined logic: if we have a VLM re-parsed result (indicated by ocr_path ending in .vlm.json), use it as the source of truth.
+    ocr_path = tbl_meta.get("ocr_path")
+    
+    # If ocr_path points to a VLM result, prefer it
+    if ocr_path and ocr_path.endswith(".vlm.json"):
+        # ocr_path is relative to structured_dir usually, but let's check
+        # In structured_extract/ocr, we save it relative to structured_dir.
+        # page_dir is structured_dir/page_XXXX.
+        # ocr_path might be "page_XXXX/tables/table_001.vlm.json"
+        
+        # We need to construct full path.
+        # page_dir.parent should be structured_dir
+        # But clearer to just use page_dir / "tables" and filename if we know it?
+        # Actually ocr_path in page.json is typically "page_0017/tables/table_001.vlm.json".
+        vlm_full_path = page_dir.parent / ocr_path
+        if vlm_full_path.exists():
+            print(f"    [Info] Using VLM result for table {table_id_str}")
+            # VLM outcome is list of cells, but we need to wrap it in "cells" key if load_table expects {"cells": [...]}
+            # My table_vlm.py returns {"cells": [...]}. So it matches.
+            table_data = load_json_file(vlm_full_path)
+        else:
+             # Fallback
+             print(f"    [Warn] VLM path {vlm_full_path} missing, falling back to Docling.")
+             table_data = load_json_file(json_path)
+    else:
+        table_data = load_json_file(json_path)
+
     if not table_data:
         return
 
