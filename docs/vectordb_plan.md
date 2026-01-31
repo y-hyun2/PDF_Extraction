@@ -37,6 +37,7 @@ python3 src/build_vector_db.py --reset
 - 페이지 대표 텍스트는 그림 설명을 페이지당 합산하되 전체 길이 1500자에서 잘라서 포함.
 - 표 셀 데이터는 페이지 단위로 `fetch_table_cells()`를 호출해 메모리 사용 최소화.
 - 각 upsert 배치는 `BATCH_SIZE=32`로 나눠 처리.
+- 벡터 검색(`src/search_vector_db.py`)은 `--mode hybrid` 기본, 세모/키워드 결과를 합친 뒤 로컬 Reranker(BAAI/bge-reranker-v2-m3)로 재정렬한다.
 ```
 embed_and_upsert(collection, model, ids, documents, metadatas)
 ```
@@ -80,5 +81,6 @@ embed_and_upsert(collection, model, ids, documents, metadatas)
 - 페이지/청크 컬렉션을 기준으로 `doc_id` → `page_no` → `table_id/figure_id`로 필터링하는 API 모듈 작성.
 - `table_ids`/`figure_ids` JSON 문자열을 역직렬화해 해당 테이블/그림 원본 데이터를 UI에서 바로 호출.
 - 필요 시 PDF 이미지 썸네일을 외부 스토리지에 올리고 `image_path` 대신 URL을 메타데이터로 저장.
+- 검색 고도화: BM25 전용 인덱스를 외부 검색엔진에 구축하거나, reranker 결과를 캐시해 응답 속도 향상을 검토.
 
 이 설계를 기준으로 `build_vector_db.py`와 `docs/pipeline.md`가 이미 최신화되어 있으니, 추가 요구사항이 생기면 해당 스크립트와 문서를 함께 수정하면 된다.

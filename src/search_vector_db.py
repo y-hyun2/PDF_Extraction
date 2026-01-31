@@ -1,37 +1,39 @@
-"""Chroma 벡터 DB 검색 스크립트.
+"""Chroma 벡터 DB 검색 스크립트 (Semantic + Keyword + 로컬 Reranker)."""
 
-Semantic(코사인 기반) 검색과 키워드(BM25) 검색을 모두 지원하며,
-필요 시 두 결과를 혼합(Hybrid)할 수 있다.
-
-Usage:
-    python src/search_vector_db.py "query string" [--top-k 5] [--mode semantic|keyword|hybrid]
-"""
+from __future__ import annotations
 
 import argparse
-import sys
-import os
 import json
+import math
+import os
+import re
+from collections import Counter
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
 import chromadb
 from sentence_transformers import SentenceTransformer
 
 try:
-    from kiwipiepy import Kiwi  # 선택적 한국어 형태소 분석기
+    from kiwipiepy import Kiwi
+
     KIWI = Kiwi()
 except Exception:  # pylint: disable=broad-except
     KIWI = None
 
-import math
-import re
-from collections import Counter
+try:
+    RERANKER = SentenceTransformer("BAAI/bge-reranker-v2-m3")
+except Exception:
+    RERANKER = None
 
-# Configuration (Must match build_vector_db.py)
 VECTOR_DB_DIR = "vector_db"
-# 기본 구조 변경: 페이지/청크 2개 컬렉션을 모두 검사할 수 있도록 리스트로 보관
-COLLECTIONS = ["esg_pages", "esg_chunks", "esg_documents"]  # 존재하는 컬렉션만 사용
+COLLECTIONS = ["esg_pages", "esg_chunks"]
 EMBEDDING_MODEL_NAME = "BAAI/bge-m3"
+MAX_KEYWORD_DOCS = 2000
+RERANK_CANDIDATES = 50
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> List[str]:
     text = (text or "").strip()
     if not text:
         return []
@@ -40,7 +42,7 @@ def tokenize(text: str) -> list[str]:
     return re.findall(r"[0-9A-Za-z가-힣]+", text)
 
 
-def bm25_scores(corpus_tokens: list[list[str]], query_tokens: list[str], k1: float = 1.5, b: float = 0.75) -> list[float]:
+def bm25_scores(corpus_tokens: List[List[str]], query_tokens: List[str], k1: float = 1.5, b: float = 0.75) -> List[float]:
     if not corpus_tokens:
         return []
     N = len(corpus_tokens)
@@ -48,8 +50,7 @@ def bm25_scores(corpus_tokens: list[list[str]], query_tokens: list[str], k1: flo
     avgdl = sum(doc_lens) / max(N, 1)
     df: Counter[str] = Counter()
     for tokens in corpus_tokens:
-        unique = set(tokens)
-        for term in unique:
+        for term in set(tokens):
             df[term] += 1
 
     scores = []
@@ -68,6 +69,7 @@ def bm25_scores(corpus_tokens: list[list[str]], query_tokens: list[str], k1: flo
         scores.append(score)
     return scores
 
+
 def load_collections(client: chromadb.PersistentClient):
     active = []
     for name in COLLECTIONS:
@@ -78,7 +80,7 @@ def load_collections(client: chromadb.PersistentClient):
     return active
 
 
-def semantic_search(collections: list, model, query: str, top_k: int) -> list[tuple[str, str, dict, float]]:
+def semantic_search(collections, model, query: str, top_k: int) -> List[Tuple[str, str, Dict, float]]:
     query_vec = model.encode([query]).tolist()
     results = []
     for collection in collections:
@@ -86,34 +88,28 @@ def semantic_search(collections: list, model, query: str, top_k: int) -> list[tu
         docs = resp.get("documents") or []
         if not docs:
             continue
-        for cid, doc, meta, dist in zip(resp["ids"][0], docs[0], resp["metadatas"][0], resp["distances"][0]):
+        for doc, meta, dist in zip(docs[0], resp["metadatas"][0], resp["distances"][0]):
             results.append((collection.name, doc, meta, dist))
-    # distance는 cosine distance(0에 가까울수록 유사)
     results.sort(key=lambda item: item[3])
     return results[:top_k]
 
 
-def keyword_search(collections: list, query: str, top_k: int) -> list[tuple[str, str, dict, float]]:
+def keyword_search(collections, query: str, top_k: int) -> List[Tuple[str, str, Dict, float]]:
     query_tokens = tokenize(query)
     if not query_tokens:
         return []
-    docs_all: list[tuple[str, str, dict, list[str]]] = []
+    docs_all = []
     for collection in collections:
-        data = collection.get(include=["documents", "metadatas", "ids"])
+        data = collection.get(include=["documents", "metadatas"], limit=MAX_KEYWORD_DOCS)
         docs = data.get("documents") or []
         metas = data.get("metadatas") or []
-        ids = data.get("ids") or []
-        for doc_id, text, meta in zip(ids, docs, metas):
+        for text, meta in zip(docs, metas):
             tokens = tokenize(text)
-            docs_all.append((collection.name, doc_id, text, meta, tokens))
-
-    corpus_tokens = [item[4] for item in docs_all]
+            docs_all.append((collection.name, text, meta, tokens))
+    corpus_tokens = [item[3] for item in docs_all]
     scores = bm25_scores(corpus_tokens, query_tokens)
     ranked = sorted(zip(docs_all, scores), key=lambda x: x[1], reverse=True)
-    results = []
-    for (col_name, doc_id, text, meta, _), score in ranked[:top_k]:
-        results.append((col_name, text, meta, score))
-    return results
+    return [(name, text, meta, score) for (name, text, meta, _), score in ranked[:top_k]]
 
 
 def format_result(rank: int, mode: str, collection_name: str, doc: str, meta: dict, score: float) -> None:
@@ -128,7 +124,7 @@ def format_result(rank: int, mode: str, collection_name: str, doc: str, meta: di
     print("-" * 80)
 
 
-def search_vector_db(query: str, top_k: int = 5, mode: str = "semantic"):
+def search_vector_db(query: str, top_k: int = 5, mode: str = "hybrid"):
     print(f"🔎 Query='{query}' | Mode={mode} | Top {top_k}")
     abs_path = os.path.abspath(VECTOR_DB_DIR)
     if not os.path.exists(abs_path):
@@ -143,35 +139,42 @@ def search_vector_db(query: str, top_k: int = 5, mode: str = "semantic"):
 
     model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
-    results_sem = results_kw = []
+    semantic_res = keyword_res = []
     if mode in {"semantic", "hybrid"}:
-        results_sem = semantic_search(collections, model, query, top_k)
+        semantic_res = semantic_search(collections, model, query, top_k)
     if mode in {"keyword", "hybrid"}:
-        results_kw = keyword_search(collections, query, top_k)
+        keyword_res = keyword_search(collections, query, top_k)
 
-    # hybrid는 두 결과 리스트를 순차적으로 병합
-    combined: list[tuple[str, str, dict, float, str]] = []
+    combined = []
     if mode == "semantic":
-        combined = [(name, doc, meta, score, "semantic") for name, doc, meta, score in results_sem]
+        combined = [(name, doc, meta, score, "semantic") for name, doc, meta, score in semantic_res]
     elif mode == "keyword":
-        combined = [(name, doc, meta, score, "keyword") for name, doc, meta, score in results_kw]
+        combined = [(name, doc, meta, score, "keyword") for name, doc, meta, score in keyword_res]
     else:
         seen = set()
-        for name, doc, meta, score in results_sem:
+        for name, doc, meta, score in semantic_res:
             key = (name, meta.get("doc_id"), meta.get("page_id"), meta.get("chunk_index"))
-            combined.append((name, doc, meta, score, "semantic"))
+            combined.append((name, doc, meta or {}, score, "semantic"))
             seen.add(key)
-        for name, doc, meta, score in results_kw:
+        for name, doc, meta, score in keyword_res:
             key = (name, meta.get("doc_id"), meta.get("page_id"), meta.get("chunk_index"))
             if key in seen:
                 continue
-            combined.append((name, doc, meta, score, "keyword"))
+            combined.append((name, doc, meta or {}, score, "keyword"))
     if not combined:
         print("검색 결과가 없습니다.")
         return
 
-    for idx, (col_name, doc, meta, score, mode_tag) in enumerate(combined[:top_k], start=1):
-        format_result(idx, mode_tag, col_name, doc, meta or {}, score)
+    if RERANKER is not None:
+        docs = [doc for _, doc, _, _, _ in combined]
+        scores = RERANKER.compute_score([[query, d] for d in docs], batch_size=16)
+        combined = sorted(zip(combined, scores), key=lambda x: x[1], reverse=True)
+    else:
+        combined = [(item, item[3]) for item in combined]
+
+    for idx, ((col_name, doc, meta, _, mode_tag), score) in enumerate(combined[:top_k], start=1):
+        format_result(idx, mode_tag, col_name, doc, meta, float(score))
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Chroma 기반 ESG Vector 검색기")
@@ -181,9 +184,7 @@ if __name__ == "__main__":
         "--mode",
         choices=("semantic", "keyword", "hybrid"),
         default="hybrid",
-        help="검색 방식 선택 (semantic=임베딩, keyword=BM25, hybrid=두 방식 병합)",
+        help="검색 방식 선택",
     )
-
     args = parser.parse_args()
-
     search_vector_db(args.query, top_k=args.top_k, mode=args.mode)
