@@ -34,7 +34,6 @@ def get_or_create_collections(client: chromadb.PersistentClient, reset: bool):
                 client.delete_collection(name)
             except Exception:
                 pass
-
     page_col = client.get_or_create_collection(PAGE_COLLECTION, metadata={"hnsw:space": "cosine"})
     chunk_col = client.get_or_create_collection(CHUNK_COLLECTION, metadata={"hnsw:space": "cosine"})
     return page_col, chunk_col
@@ -117,7 +116,6 @@ def fetch_table_cells(conn, table_ids: Iterable[int]) -> Dict[int, List[Dict[str
     with conn.cursor() as cursor:
         cursor.execute(sql, table_ids)
         rows = cursor.fetchall()
-
     grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for row in rows:
         grouped[row["table_id"]].append(row)
