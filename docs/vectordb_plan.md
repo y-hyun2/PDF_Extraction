@@ -6,7 +6,7 @@
 
 | 컬렉션 | 목적 | 텍스트 구성 | 메타데이터(주요) |
 |--------|------|-------------|----------------|
-| `esg_pages` | 페이지 단위 대표 검색 | `full_markdown` + 페이지 표 제목 + 그림 요약(총 1500자 제한) | `doc_id`, `page_id`, `page_no`, `page_image_path`, `table_ids`(JSON 문자열), `figure_ids`(JSON 문자열), `company_name`, `report_year`, `filename`, `created_at` |
+| `esg_pages` | 페이지 단위 대표 검색 | GPT 요약(`gpt-4o-mini`, `temperature=0.3`, `max_output_tokens=800`, `OPENAI_API_KEY` 필수)로 페이지 본문/표/그림 설명과 `page.png` 이미지를 함께 보내 지정 포맷으로 정리 | `doc_id`, `page_id`, `page_no`, `page_image_path`, `table_ids`(JSON 문자열), `figure_ids`(JSON 문자열), `company_name`, `report_year`, `filename`, `created_at` |
 | `esg_chunks` | 정밀 검색(본문 청크/표/그림 설명) | - 본문 청크(문자 기준 512/overlap 50)<br>- 표 요약(셀 텍스트 행/열 순 재조합 + diff 정보)<br>- 그림 설명(`figure_***.desc.md`) | `source_type`(`page_text`/`table`/`figure`), `doc_id`, `page_id`, `page_no`, `chunk_index` or `table_id`/`figure_id`, `image_path`, `company_name`, `report_year`, `filename`, `created_at` |
 
 > **주의**: Chroma는 메타데이터 값이 `str/int/float/bool/None`만 허용하므로 리스트(`table_ids`, `figure_ids`)는 JSON 문자열로 저장한다. 조회 시 `json.loads(metadata["table_ids"])` 형태로 다시 리스트로 복원한다.
@@ -34,10 +34,10 @@ python3 src/build_vector_db.py --reset
 - Chroma PersistentClient를 `vector_db/` 경로에 생성.
 - `--reset` 시 기존 `esg_pages`, `esg_chunks` 컬렉션 삭제 후 재생성.
 - 임베딩 모델 `BAAI/bge-m3`는 SentenceTransformer가 첫 실행 시 자동 다운로드.
-- 페이지 대표 텍스트는 그림 설명을 페이지당 합산하되 전체 길이 1500자에서 잘라서 포함.
+- 페이지 대표 텍스트는 OpenAI GPT(`gpt-4o-mini`, `OPENAI_API_KEY` 필요)로 전용 프롬프트를 사용해 한글 요약을 생성하고, `page.png` 이미지를 함께 올려 표/그림 내용을 텍스트로 풀어낸다.
 - 표 셀 데이터는 페이지 단위로 `fetch_table_cells()`를 호출해 메모리 사용 최소화.
 - 각 upsert 배치는 `BATCH_SIZE=32`로 나눠 처리.
-- 벡터 검색(`src/search_vector_db.py`)은 기본적으로 `hybrid` 모드로 semantic + BM25 결과를 합친 뒤 로컬 Reranker(`BAAI/bge-reranker-v2-m3`)로 재정렬한다.
+- 벡터 검색(`src/search_vector_db.py`)은 기본적으로 `hybrid` 모드로 semantic 후보(개수는 `--semantic-top-k`, 기본 40)를 넓게 뽑고, 그 후보에 대해 BM25 점수를 다시 계산(BM25는 페이지 대표 요약 + 해당 페이지의 본문/표/그림 청크를 모두 합친 텍스트를 corpus로 사용)해 정규화 후 가중합 → 로컬 Reranker(`BAAI/bge-reranker-v2-m3`) 순으로 최종 정렬한다. 최종 출력 시 같은 페이지(`doc_id`+`page_no`)에 해당하는 문서가 여러 개 있으면 하나만 남긴다. `--show-scores`를 주면 semantic/BM25/combined 점수와 reranker 점수를 함께 출력할 수 있다. (키워드 검색을 위해 `kiwipiepy` 설치가 필수)
 ```
 embed_and_upsert(collection, model, ids, documents, metadatas)
 ```
@@ -77,10 +77,12 @@ embed_and_upsert(collection, model, ids, documents, metadatas)
 }
 ```
 
-## 5. 추후 확장 아이디어
+
+## 5. 실행/추가 팁
 - 페이지/청크 컬렉션을 기준으로 `doc_id` → `page_no` → `table_id/figure_id`를 필터링하는 API/서비스 만들기.
 - `table_ids`/`figure_ids` JSON 문자열을 역직렬화해 원본 표/그림 데이터를 UI에서 즉시 노출.
 - PDF 이미지 썸네일을 외부 스토리지에 두고 `image_path` 대신 URL을 메타데이터로 저장.
 - 검색 요청이 많은 경우, reranker 결과를 캐시하거나 외부 검색엔진과 연동해 응답 속도 최적화.
+- 특정 페이지의 GPT 요약이 궁금하면 `python3 src/debug_page_summary.py <doc_id> <page_no>`를 실행해 `esg_pages` 컬렉션에 저장된 요약 텍스트와 메타데이터를 확인할 수 있다.
 
 이 설계를 기준으로 `build_vector_db.py`와 `docs/pipeline.md`가 이미 최신화되어 있으니, 추가 요구사항이 생기면 해당 스크립트와 문서를 함께 수정하면 된다.
