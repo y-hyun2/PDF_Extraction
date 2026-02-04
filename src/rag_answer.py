@@ -153,13 +153,30 @@ def main():
     if args.company or args.year:
         print(f"   Filters: Company='{args.company}', Year='{args.year}'")
 
-    results = search_vector_db(
-        args.query, 
-        top_k=args.top_k, 
-        filter_company=args.company, 
-        filter_year=args.year
-    )
+    results = search_vector_db(args.query, top_k=args.top_k)
     
+    # 필요 시 회사/연도 조건으로 결과를 한 번 더 필터링한다.
+    company_filter = args.company.lower() if args.company else None
+    year_filter = str(args.year) if args.year else None
+
+    if company_filter or year_filter:
+        filtered = []
+        for res in results:
+            meta = res.get('metadata', {})
+            company_name = str(meta.get('company_name') or meta.get('company') or '').lower()
+            report_year = str(meta.get('report_year') or meta.get('year') or '')
+
+            if company_filter and company_filter not in company_name:
+                continue
+            if year_filter and year_filter != report_year:
+                continue
+            filtered.append(res)
+
+        if not filtered:
+            print("⚠️ 필터 조건에 맞는 결과가 없어 전체 결과를 사용합니다.")
+        else:
+            results = filtered
+
     if not results:
         print("Test ended: No results found.")
         return
