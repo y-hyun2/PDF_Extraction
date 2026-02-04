@@ -17,27 +17,25 @@ import argparse
 import sys
 import os
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from dotenv import load_dotenv
 import torch
 from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image
 
-# Load environment variables (HF_TOKEN)
+# 허깅페이스 비공개 모델 접근 토큰을 환경변수에서 불러온다.
 load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Import existing search logic
+# 동일 디렉터리의 검색 모듈을 불러와 중복 제거된 결과를 재활용한다.
 sys.path.append(str(Path(__file__).parent))
-from search_vector_db import search_vector_db  # We might need to refactor search_vector_db to be importable or copy logic
-# actually, search_vector_db.py has a main(), let's extract the search function if possible or just import it if it has a clean function.
-# Looking at search_vector_db.py content from memory/files... it has search_vector_db function.
+from search_vector_db import search_vector_db
 
+# 다른 스크립트에서도 재사용할 수 있도록 남겨둔 보조 로더 함수.
 def load_model(model_id: str):
     print(f"📦 Loading Model '{model_id}'...")
     try:
-        # Assuming Gemma 3n uses standard AutoClasses or similar
         processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -51,105 +49,106 @@ def load_model(model_id: str):
         print(f"❌ Failed to load model: {e}")
         sys.exit(1)
 
-def get_unique_pages_from_results(results: List[Dict], max_images: int = 3):
-    """
-    Extract unique page info (image path) from search results.
-    Preserve order of relevance (Rank 1 page first).
-    """
-    seen_pages = set()
-    unique_contexts = []
-    
-    start_dir = Path("data/pages_structured") # Base path for images
-    
-    for res in results:
-        # metadata contains 'image_path' (ref to page image usually) or we infer it
-        # Actually vector_db metadata might mostly have chunk text and IDs.
-        # We need to look up the Page Image Path from the Doc/Page ID.
-        # Format of ID: doc_{doc_id}_page_{page_no}_chunk_{chunk_id}
-        # Metadata: 'source', 'page_no', 'doc_id', etc.
-        
-        meta = res.get('metadata', {})
-        doc_name = meta.get('company', 'Unknown') + "_" + str(meta.get('year', '2023')) # Heuristic
-        # Better: use the 'source' field which is formatted like "HDEC (2023) | p.11"
-        # Or construct path: data/pages_structured/{ReportName}/page_{page_no}/page.png
-        
-        # We need the Report Directory Name. 
-        # Metadata 'filename' is stored in Chroma? Let's check search_vector_db output structure.
-        # It prints "Source: HDEC (2023) | p.11".
-        
-        # Let's assume we can map back to file path or we query DB.
-        # For prototype, we will SEARCH for the page image based on page_no.
-        # Assuming single report or simple mapping.
-        
-        # Let's try to pass the 'doc_name' (e.g. 2025_HDEC_Report) as arg or infer.
-        # If we have multiple reports, we need to know WHICH report the chunk belongs to.
-        # Our Chroma metadata SHOULD have 'doc_name' or 'filename'.
-        
-        # Assuming we can find the image:
-        # For now, let's look at `res['metadata']`.
-        pass 
-        
-    return []
+# 메타데이터 힌트를 이용해 data/pages_structured 내 페이지 이미지를 찾는다.
+def get_page_image_path(metadata: Dict, page_no: Optional[int]) -> Optional[Path]:
+    """Locate the PNG corresponding to a page by inferring the report folder name."""
 
-# Refined Plan: 
-# We need `search_vector_db` to return METADATA including file paths or doc names.
-# Current `search_vector_db.py` prints results. We should import `query_vector_db` from `build_vector_db`? 
-# or modify `search_vector_db.py` to return data.
+    # 필수 정보가 없으면 바로 종료한다.
+    if page_no is None:
+        return None
 
-
-def get_page_image_path(doc_name: str, page_no: int) -> Path:
-    """
-    Construct path to page image.
-    Assumption: doc_name matches folder in data/pages_structured.
-    Example: 2023_HDEC_Report -> data/pages_structured/2023_HDEC_Report/page_0011/page.png
-    """
     base_dir = Path("data/pages_structured")
-    
-    # Try exact match first
-    candidate = base_dir / doc_name / f"page_{page_no:04d}" / "page.png"
-    if candidate.exists():
-        return candidate
-        
-    # Try finding in sanitized/subdirs if exact mismatch (common issue)
-    # The doc_name in metadata might be "HDEC_2023" but folder is "2023_HDEC_Report"
-    # Metadata 'company_name'='HDEC', 'report_year'=2023.
-    # We need to scan base_dir for folder matching year and company?
-    # Heuristic: Scan for year
+    if not base_dir.exists():
+        return None
+
+    company = metadata.get('company_name') or metadata.get('company') or ''
+    report_year = metadata.get('report_year') or metadata.get('year') or ''
+    filename = metadata.get('filename') or ''
+    direct_report_dir = (
+        metadata.get('report_dir')
+        or metadata.get('doc_dir')
+        or metadata.get('doc_name_hint')
+    )
+
+    candidate_dirs: List[str] = []
+    seen = set()
+
+    def add_candidate(name: Optional[str]):
+        if not name:
+            return
+        clean = str(name).strip()
+        if not clean or clean in seen:
+            return
+        candidate_dirs.append(clean)
+        seen.add(clean)
+
+    # 메타데이터에 폴더명이 명시돼 있으면 최우선으로 시도한다.
+    add_candidate(direct_report_dir)
+
+    if filename:
+        stem = Path(filename).stem
+        add_candidate(stem)
+        add_candidate(stem.replace(" ", "_"))
+        add_candidate(stem.replace("-", "_"))
+
+    if company and report_year:
+        combos = [
+            f"{report_year}_{company}_Report",
+            f"{company}_{report_year}_Report",
+            f"{report_year}_{company}",
+            f"{company}_{report_year}",
+        ]
+        for combo in combos:
+            add_candidate(combo)
+            add_candidate(combo.replace(" ", "_"))
+
+    # 위에서 수집한 후보 디렉터리를 순차적으로 검사한다.
+    page_dir_name = f"page_{page_no:04d}"
+    for candidate in candidate_dirs:
+        page_path = base_dir / candidate / page_dir_name / "page.png"
+        if page_path.exists():
+            return page_path
+
+    # 보조 수단: 회사/연도 키워드를 모두 포함한 폴더를 훑는다.
+    company_upper = company.upper()
+    year_str = str(report_year)
     for folder in base_dir.iterdir():
-        if not folder.is_dir(): continue
-        if str(page_no) in folder.name: # Wrong, folder is report name
-             pass
-        # Check if folder name contains the doc_name parts?
-        # Let's try flexible match
-        # Normalize: 2023 in name AND HDEC (or company) in name?
-        pass # To simplify, we rely on metadata HAVING the exact folder name if possible?
-             # Currently metadata has 'company_name' and 'report_year'.
-             # We might need to map "HDEC" + "2023" -> "2023_HDEC_Report".
-    
-    # Fallback: check 2025_HDEC_Report (hardcoded check for common ones)
-    fallback_folder = f"{2023 if '2023' in doc_name else 2025}_HDEC_Report"
-    candidate = base_dir / fallback_folder / f"page_{page_no:04d}" / "page.png"
-    if candidate.exists():
-        return candidate
-    candidate_sanitized = base_dir / f"{fallback_folder}_sanitized" / f"page_{page_no:04d}" / "page.png"
-    if candidate_sanitized.exists():
-        return candidate_sanitized
-        
+        if not folder.is_dir():
+            continue
+        folder_name_upper = folder.name.upper()
+        if company_upper and company_upper not in folder_name_upper:
+            continue
+        if year_str and year_str not in folder.name:
+            continue
+        candidate_path = folder / page_dir_name / "page.png"
+        if candidate_path.exists():
+            return candidate_path
+
+    # 최종 수단: 페이지 폴더가 존재하는 모든 경로를 확인한다.
+    for folder in base_dir.iterdir():
+        if not folder.is_dir():
+            continue
+        candidate_path = folder / page_dir_name / "page.png"
+        if candidate_path.exists():
+            return candidate_path
+
     return None
 
+# 전체 RAG + VLM 파이프라인을 조립하는 엔트리포인트.
 def main():
+    # CLI 인자를 정의해 질의/필터 방식을 제어한다.
     parser = argparse.ArgumentParser(description="RAG Answer Generator")
     parser.add_argument("query", type=str, help="Question to ask")
     parser.add_argument("--model", type=str, default="google/gemma-3-4b-it", help="Model ID") 
     parser.add_argument("--top-k", type=int, default=3, help="Number of chunks to retrieve")
     
-    # Filter args
+    # 회사/연도 필터 인자
     parser.add_argument("--company", type=str, default=None, help="Filter by Company Name (e.g. HDEC)")
     parser.add_argument("--year", type=int, default=None, help="Filter by Report Year (e.g. 2023)")
     
     args = parser.parse_args()
     
-    # 1. Search
+    # 1단계: 가장 관련 있는 페이지를 벡터 DB에서 검색한다.
     print(f"🔎 Searching for: '{args.query}'")
     if args.company or args.year:
         print(f"   Filters: Company='{args.company}', Year='{args.year}'")
@@ -165,8 +164,8 @@ def main():
         print("Test ended: No results found.")
         return
 
-    # 2. Process Contexts & Images
-    unique_pages = {}  # page_key -> {image_path, texts, page_info}
+    # 2단계: 페이지 단위로 텍스트/이미지를 묶어 동기화한다.
+    unique_pages = {}  # page_key -> {image_path, texts, page_info} 구조
 
     for res in results:
         meta = res.get('metadata', {})
@@ -182,7 +181,10 @@ def main():
 
         if page_key not in unique_pages:
             doc_name_hint = f"{doc_year}_{company}_Report"
-            img_path = get_page_image_path(doc_name_hint, page_no)
+            meta_with_hint = dict(meta)
+            meta_with_hint.setdefault('doc_name_hint', doc_name_hint)
+            # 가능한 한 정확한 페이지 이미지 경로를 붙인다.
+            img_path = get_page_image_path(meta_with_hint, page_no)
 
             unique_pages[page_key] = {
                 "image_path": img_path,
@@ -193,14 +195,13 @@ def main():
         if chunk_text:
             unique_pages[page_key]["texts"].append(chunk_text)
 
-    # 3. Load Model
-    # ... (Model loading logic remains same) ...
+    # 3단계: 멀티모달 지시형 모델과 프로세서를 로드한다.
     print(f"📦 Loading Model '{args.model}'...")
     try:
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             device_map="auto",
-            torch_dtype=torch.bfloat16,  # Changed to bfloat16 for stability
+            torch_dtype=torch.bfloat16,  # 더 안정적인 추론을 위해 bfloat16 사용
             trust_remote_code=True,
             token=HF_TOKEN 
         ).eval()
@@ -215,25 +216,30 @@ def main():
              print("💡 Tip: Ensure HF_TOKEN is set in .env and you have access to the model.")
         return
 
-    # 4. Construct Prompt
-    # We will feed images + text context.
-    # Handling multiple images: Most VLMs support list of images or interleaved.
-    # We will format as a chat.
+    # 4단계: 이미지와 텍스트가 섞인 멀티모달 대화 프롬프트를 구성한다.
     
     messages = [
-        {"role": "system", "content": "You are a helpful AI assistant. Answer the user's question based on the provided visual and text context."},
+        {
+            "role": "system",
+            "content": (
+                "You are an ESG report analyst. Use only the provided context. "
+                "Never hallucinate or fabricate data. Cite page-level evidence explicitly. "
+                "When quoting tables or figures, copy the numbers exactly as shown."
+            ),
+        },
     ]
     
+    # 사용자 메시지에 텍스트/이미지를 번갈아 배치한다.
     user_content = []
     user_content.append({"type": "text", "text": f"Question: {args.query}\n\nContexts:\n"})
     
     images_loaded = []
     
-    # Iterating pages (limit to top 3 unique pages to save VRAM)
+    # VRAM 절약을 위해 상위 3개 페이지까지만 사용한다.
     for i, (key, data) in enumerate(list(unique_pages.items())[:3]):
         if data["image_path"]:
             user_content.append({"type": "text", "text": f"--- Page Image ({data['page_info']}) ---\n"})
-            user_content.append({"type": "image", "image": str(data["image_path"])}) # Processor handles path string or PIL
+            user_content.append({"type": "image", "image": str(data["image_path"])}) # Processor가 경로 문자열 또는 PIL 이미지를 처리
             images_loaded.append(data["image_path"])
         
         texts_combined = "\n... \n".join(data["texts"])
@@ -242,13 +248,13 @@ def main():
     user_content.append({"type": "text", "text": "Answer:"})
     messages.append({"role": "user", "content": user_content})
 
-    # 5. Generate
+    # 5단계: 전체 컨텍스트를 조건으로 답변을 생성한다.
     print("🤖 Generating Answer...")
     
-    # Prepare inputs
+    # 모델 입력 텐서를 준비한다.
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     
-    # Load PIL images
+    # PIL 이미지 객체를 불러온다.
     pil_images = [Image.open(p) for p in images_loaded] if images_loaded else None
     
     inputs = processor(
