@@ -16,6 +16,7 @@ Handling "All different pages":
 import argparse
 import sys
 import os
+import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import time
@@ -29,6 +30,7 @@ from PIL import Image
 # 허깅페이스 비공개 모델 접근 토큰을 환경변수에서 불러온다.
 load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN")
+PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "esg_multimodal_prompt.json"
 
 # 동일 디렉터리의 검색 모듈을 불러와 중복 제거된 결과를 재활용한다.
 sys.path.append(str(Path(__file__).parent))
@@ -46,9 +48,10 @@ def infer_filters_from_query(query: str) -> Tuple[Optional[str], Optional[int]]:
             inferred_year = 2000 + shorthand
 
     inferred_company = None
-    if "현대건설" in query:
+    normalized = query.replace(" ", "")
+    if "현대건설" in normalized:
         inferred_company = "HDEC"
-    elif "삼성물산" in query:
+    elif "삼성물산" in normalized:
         inferred_company = "Samsung"
 
     return inferred_company, inferred_year
@@ -209,7 +212,7 @@ def main():
         page_key = f"{company}_{doc_year}_{page_no}"
 
         if page_key not in unique_pages:
-            doc_name_hint = f"{doc_year}_{company}_Report"
+            doc_name_hint = Path(str(meta.get('filename', ''))).stem or f"{doc_year}_{company}_Report"
             meta_with_hint = dict(meta)
             meta_with_hint.setdefault('doc_name_hint', doc_name_hint)
             # 가능한 한 정확한 페이지 이미지 경로를 붙인다.
@@ -246,21 +249,19 @@ def main():
         return
 
     # 4단계: 이미지와 텍스트가 섞인 멀티모달 대화 프롬프트를 구성한다.
-    
+    prompt_template = load_prompt_template()
+
     messages = [
         {
             "role": "system",
-            "content": (
-                "You are an ESG report analyst. Use only the provided context. "
-                "Never hallucinate or fabricate data. Cite page-level evidence explicitly. "
-                "When quoting tables or figures, copy the numbers exactly as shown."
-            ),
+            "content": prompt_template.get("system"),
         },
     ]
     
     # 사용자 메시지에 텍스트/이미지를 번갈아 배치한다.
     user_content = []
-    user_content.append({"type": "text", "text": f"Question: {args.query}\n\nContexts:\n"})
+    intro_text = prompt_template.get("user_intro", "Question: {question}\n\nContexts:\n").format(question=args.query)
+    user_content.append({"type": "text", "text": intro_text})
     
     images_loaded = []
     
@@ -274,6 +275,9 @@ def main():
         texts_combined = "\n... \n".join(data["texts"])
         user_content.append({"type": "text", "text": f"\n[Extracted Text for {data['page_info']}]:\n{texts_combined}\n\n"})
 
+    citation_instruction = prompt_template.get("answer_instruction", "")
+    if citation_instruction:
+        user_content.append({"type": "text", "text": citation_instruction})
     user_content.append({"type": "text", "text": "Answer:"})
     messages.append({"role": "user", "content": user_content})
 
@@ -312,3 +316,19 @@ def main():
 
 if __name__ == "__main__":
     main()
+def load_prompt_template() -> Dict[str, str]:
+    if PROMPT_TEMPLATE_PATH.exists():
+        with open(PROMPT_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    # 기본 템플릿 (폴백)
+    return {
+        "system": (
+            "You are an ESG report analyst. Use only the provided context. "
+            "Never hallucinate or fabricate data. Cite page-level evidence explicitly. "
+            "When quoting tables or figures, copy the numbers exactly as shown."
+        ),
+        "user_intro": "Question: {question}\n\nContexts:\n",
+        "answer_instruction": (
+            "Answer in Korean and end every factual sentence with (회사 연도 p.페이지)."
+        ),
+    }
