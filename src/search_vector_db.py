@@ -95,11 +95,14 @@ def load_collections(client: chromadb.PersistentClient):
     return collections
 
 
-def semantic_search(collections, model, query: str, top_k: int) -> List[Candidate]:
+def semantic_search(collections, model, query: str, top_k: int, metadata_filter: Dict | None) -> List[Candidate]:
     query_vec = model.encode([query]).tolist()
     results: List[Candidate] = []
     for collection in collections.values():
-        resp = collection.query(query_embeddings=query_vec, n_results=top_k)
+        if metadata_filter:
+            resp = collection.query(query_embeddings=query_vec, n_results=top_k, where=metadata_filter)
+        else:
+            resp = collection.query(query_embeddings=query_vec, n_results=top_k)
         docs = resp.get("documents") or []
         if not docs:
             continue
@@ -110,13 +113,13 @@ def semantic_search(collections, model, query: str, top_k: int) -> List[Candidat
     return results[:top_k]
 
 
-def keyword_search_full(collections, query: str, top_k: int) -> List[Candidate]:
+def keyword_search_full(collections, query: str, top_k: int, metadata_filter: Dict | None) -> List[Candidate]:
     query_tokens = tokenize(query)
     if not query_tokens:
         return []
     docs_all = []
     for collection in collections.values():
-        data = collection.get(include=["documents", "metadatas"], limit=MAX_KEYWORD_DOCS)
+        data = collection.get(include=["documents", "metadatas"], limit=MAX_KEYWORD_DOCS, where=metadata_filter)
         docs = data.get("documents") or []
         metas = data.get("metadatas") or []
         for text, meta in zip(docs, metas):
@@ -202,12 +205,27 @@ def format_result(rank: int, cand: Candidate, show_scores: bool) -> None:
     print("-" * 80)
 
 
+def build_metadata_filter(filter_company: str | None, filter_year: int | None) -> Dict | None:
+    conditions = []
+    if filter_company:
+        conditions.append({"company_name": filter_company})
+    if filter_year:
+        conditions.append({"report_year": filter_year})
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
 def search_vector_db(
     query: str,
     top_k: int = 5,
     mode: str = "hybrid",
     semantic_top_k: int = 40,
     show_scores: bool = False,
+    filter_company: str | None = None,
+    filter_year: int | None = None,
 ):
     print(f"🔎 Query='{query}' | Mode={mode} | Top {top_k}")
     client = chromadb.PersistentClient(path=VECTOR_DB_DIR)
@@ -218,15 +236,16 @@ def search_vector_db(
 
     model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     chunk_collection = collections.get("esg_chunks")
+    metadata_filter = build_metadata_filter(filter_company, filter_year)
 
     if mode == "semantic":
-        candidates = semantic_search(collections, model, query, max(top_k, semantic_top_k))
+        candidates = semantic_search(collections, model, query, max(top_k, semantic_top_k), metadata_filter)
         apply_combined_score(candidates, use_sem=True, use_kw=False)
     elif mode == "keyword":
-        candidates = keyword_search_full(collections, query, top_k)
+        candidates = keyword_search_full(collections, query, top_k, metadata_filter)
         apply_combined_score(candidates, use_sem=False, use_kw=True)
     else:
-        sem_candidates = semantic_search(collections, model, query, semantic_top_k)
+        sem_candidates = semantic_search(collections, model, query, semantic_top_k, metadata_filter)
         if not sem_candidates:
             print("검색 결과가 없습니다 (semantic).")
             return []
@@ -286,6 +305,16 @@ if __name__ == "__main__":
     )
     parser.add_argument("--semantic-top-k", type=int, default=40, help="hybrid 모드에서 semantic 후보 수")
     parser.add_argument("--show-scores", action="store_true", help="각 결과의 내부 점수 출력")
+    parser.add_argument("--company", type=str, default=None, help="회사명 필터")
+    parser.add_argument("--year", type=int, default=None, help="보고서 연도 필터")
     args = parser.parse_args()
 
-    search_vector_db(args.query, top_k=args.top_k, mode=args.mode, semantic_top_k=args.semantic_top_k, show_scores=args.show_scores)
+    search_vector_db(
+        args.query,
+        top_k=args.top_k,
+        mode=args.mode,
+        semantic_top_k=args.semantic_top_k,
+        show_scores=args.show_scores,
+        filter_company=getattr(args, "company", None),
+        filter_year=getattr(args, "year", None),
+    )

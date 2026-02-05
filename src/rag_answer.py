@@ -17,7 +17,9 @@ import argparse
 import sys
 import os
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+import time
+import re
 
 from dotenv import load_dotenv
 import torch
@@ -31,6 +33,25 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 # 동일 디렉터리의 검색 모듈을 불러와 중복 제거된 결과를 재활용한다.
 sys.path.append(str(Path(__file__).parent))
 from search_vector_db import search_vector_db
+
+
+def infer_filters_from_query(query: str) -> Tuple[Optional[str], Optional[int]]:
+    """간단한 휴리스틱으로 회사명/연도를 질의에서 추출한다."""
+    year_match = re.search(r"(20\d{2})", query)
+    inferred_year = int(year_match.group(1)) if year_match else None
+    if not inferred_year:
+        shorthand_match = re.search(r"(\d{2})년", query)
+        if shorthand_match:
+            shorthand = int(shorthand_match.group(1))
+            inferred_year = 2000 + shorthand
+
+    inferred_company = None
+    if "현대건설" in query:
+        inferred_company = "HDEC"
+    elif "삼성물산" in query:
+        inferred_company = "Samsung"
+
+    return inferred_company, inferred_year
 
 # 다른 스크립트에서도 재사용할 수 있도록 남겨둔 보조 로더 함수.
 def load_model(model_id: str):
@@ -150,32 +171,23 @@ def main():
     
     # 1단계: 가장 관련 있는 페이지를 벡터 DB에서 검색한다.
     print(f"🔎 Searching for: '{args.query}'")
-    if args.company or args.year:
-        print(f"   Filters: Company='{args.company}', Year='{args.year}'")
+    filter_company = args.company
+    filter_year = args.year
+    inferred_company, inferred_year = infer_filters_from_query(args.query)
+    if not filter_company and inferred_company:
+        filter_company = inferred_company
+    if not filter_year and inferred_year:
+        filter_year = inferred_year
 
-    results = search_vector_db(args.query, top_k=args.top_k)
-    
-    # 필요 시 회사/연도 조건으로 결과를 한 번 더 필터링한다.
-    company_filter = args.company.lower() if args.company else None
-    year_filter = str(args.year) if args.year else None
+    if filter_company or filter_year:
+        print(f"   Filters: Company='{filter_company}', Year='{filter_year}' (auto-inferred when missing)")
 
-    if company_filter or year_filter:
-        filtered = []
-        for res in results:
-            meta = res.get('metadata', {})
-            company_name = str(meta.get('company_name') or meta.get('company') or '').lower()
-            report_year = str(meta.get('report_year') or meta.get('year') or '')
-
-            if company_filter and company_filter not in company_name:
-                continue
-            if year_filter and year_filter != report_year:
-                continue
-            filtered.append(res)
-
-        if not filtered:
-            print("⚠️ 필터 조건에 맞는 결과가 없어 전체 결과를 사용합니다.")
-        else:
-            results = filtered
+    results = search_vector_db(
+        args.query,
+        top_k=args.top_k,
+        filter_company=filter_company,
+        filter_year=filter_year,
+    )
 
     if not results:
         print("Test ended: No results found.")
